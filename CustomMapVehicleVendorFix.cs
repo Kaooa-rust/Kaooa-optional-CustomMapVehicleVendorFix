@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Custom Map Vehicle Vendor Fix", "Pinkstink", "1.1.2")]
+    [Info("Custom Map Vehicle Vendor Fix", "Pinkstink", "1.1.3")]
     [Description("Links vehicle vendors with spawners and repairable helipads on custom maps Updated by Pe7erS")]
     public class CustomMapVehicleVendorFix : RustPlugin
     {
@@ -133,8 +133,6 @@ namespace Oxide.Plugins
                     var currentPad = vehicleSpawner.repairableVehiclePadRef.Get(true);
                     var pad = currentPad;
                     if (!IsLive(pad))
-                        pad = vehicleSpawner.repairableVehiclePad;
-                    if (!IsLive(pad))
                         pad = FindClosestPad(candidate.Position);
 
                     if (!IsLive(pad))
@@ -143,10 +141,9 @@ namespace Oxide.Plugins
                         continue;
                     }
 
-                    if (currentPad != pad || vehicleSpawner.repairableVehiclePad != pad)
+                    if (currentPad != pad)
                     {
                         vehicleSpawner.repairableVehiclePadRef.Set(pad);
-                        vehicleSpawner.repairableVehiclePad = pad;
                         vehicleSpawner.InvalidateNetworkCache();
                         linkedCount++;
                     }
