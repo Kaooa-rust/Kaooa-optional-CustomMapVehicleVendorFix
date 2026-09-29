@@ -1,61 +1,159 @@
-﻿using Facepunch;
-using System.Linq;
+using System;
+using System.Reflection;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Custom Map Vehicle Vendor Fix", "Pinkstink", "1.0.4")]
-    [Description("Links all of the VehicleVendor NPC with the VehicleSpawner entity for custom maps")]
+    .
+    [Info("Custom Map Vehicle Vendor Fix", "Pinkstink", "1.1.1")]
+    [Description("Links vehicle vendors with spawners and repairable helipads on custom maps Updated by Pe7erS")]
     public class CustomMapVehicleVendorFix : RustPlugin
     {
+        const float VendorSearchRadius = 100f;
+        const float PadSearchRadius = 100f;
+
+        static readonly FieldInfo padRefField = typeof(VehicleSpawner).GetField("repairableVehiclePadRef",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
         void OnServerInitialized()
         {
+            var vehicleSpawners = UnityEngine.Object.FindObjectsOfType<VehicleSpawner>();
             var vehicleVendors = UnityEngine.Object.FindObjectsOfType<VehicleVendor>();
-            if (vehicleVendors == null || vehicleVendors.Length < 1)
-            {
-                PrintWarning("Failed to find any Vehicle Vendor entities");
-                return;
-            }
 
+            LinkRepairPads(vehicleSpawners);
+
+            int linkedCount = 0;
             foreach (var vehicleVendor in vehicleVendors)
             {
-                if (vehicleVendor == null)
+                if (!IsLive(vehicleVendor))
                     continue;
 
-                if (vehicleVendor.GetVehicleSpawner() != null && vehicleVendor.vehicleSpawner != null)
-                    continue;
+                var currentSpawner = vehicleVendor.GetVehicleSpawner();
+                var vehicleSpawner = currentSpawner;
+                if (!IsLive(vehicleSpawner))
+                    vehicleSpawner = vehicleVendor.vehicleSpawner;
 
-                var vehicleSpawners = Pool.GetList<VehicleSpawner>();
-                Vis.Entities(vehicleVendor.transform.position, 100f, vehicleSpawners);
-                if (vehicleSpawners == null || vehicleSpawners.Count < 1)
+                if (!IsLive(vehicleSpawner))
                 {
-                    PrintError($"Failed to find Vehicle Spawner for Vendor @ {vehicleVendor.transform.position}");
-                    Pool.FreeList(ref vehicleSpawners);
-                    continue;
+                    vehicleSpawner = null;
+                    float closestDistanceSquared = VendorSearchRadius * VendorSearchRadius;
+                    foreach (var candidate in vehicleSpawners)
+                    {
+                        if (!IsLive(candidate))
+                            continue;
+                        float distanceSquared = (candidate.transform.position - vehicleVendor.transform.position).sqrMagnitude;
+                        if (distanceSquared > VendorSearchRadius * VendorSearchRadius)
+                            continue;
+                        if (vehicleSpawner == null || distanceSquared < closestDistanceSquared)
+                        {
+                            vehicleSpawner = candidate;
+                            closestDistanceSquared = distanceSquared;
+                        }
+                    }
                 }
 
-                VehicleSpawner vehicleSpawner;
-                if (vehicleSpawners.Count > 1)
+                if (!IsLive(vehicleSpawner))
                 {
-                    vehicleSpawner = vehicleSpawners.OrderBy(x => Vector3.Distance(x.transform.position, vehicleVendor.transform.position)).First();
-                }
-                else
-                {
-                    vehicleSpawner = vehicleSpawners[0];
-                }
-
-                if (vehicleSpawner == null)
-                {
-                    PrintError($"Failed to find a nearby Vehicle Spawner for Vendor @ {vehicleVendor.transform.position}");
-                    Pool.FreeList(ref vehicleSpawners);
+                    PrintWarning($"No Vehicle Spawner within {VendorSearchRadius}m of Vendor @ {vehicleVendor.transform.position}");
                     continue;
                 }
+                if (currentSpawner == vehicleSpawner && vehicleVendor.vehicleSpawner == vehicleSpawner)
+                    continue;
 
                 vehicleVendor.spawnerRef.Set(vehicleSpawner);
                 vehicleVendor.vehicleSpawner = vehicleSpawner;
-                Puts($"Set Vehicle Spawner for Vehicle Vendor @ {vehicleVendor.transform.position}");
-                Pool.FreeList(ref vehicleSpawners);
+                vehicleVendor.InvalidateNetworkCache();
+                linkedCount++;
+                Puts($"Set Vehicle Spawner for Vendor @ {vehicleVendor.transform.position}: {vehicleSpawner.ShortPrefabName} @ {vehicleSpawner.transform.position}");
             }
+            Puts($"Linked {linkedCount} vehicle vendors");
+        }
+
+        static bool IsLive(BaseNetworkable entity)
+        {
+            return entity != null && !entity.IsDestroyed && entity.net != null && entity.isServer;
+        }
+
+        void LinkRepairPads(VehicleSpawner[] vehicleSpawners)
+        {
+            if (padRefField == null || padRefField.FieldType != typeof(EntityRef<RepairableVehiclePad>))
+            {
+                PrintError("VehicleSpawner.repairableVehiclePadRef is missing or has an unexpected type");
+                return;
+            }
+
+            int checkedCount = 0;
+            int linkedCount = 0;
+            foreach (var vehicleSpawner in vehicleSpawners)
+            {
+                if (!IsLive(vehicleSpawner))
+                    continue;
+
+                if (vehicleSpawner.spawnerType != VehicleSpawner.VehicleSpawnerType.Helicopter &&
+                    vehicleSpawner.ShortPrefabName != "airwolfspawner")
+                    continue;
+
+                checkedCount++;
+                try
+                {
+                    var padRef = (EntityRef<RepairableVehiclePad>)padRefField.GetValue(vehicleSpawner);
+                    var currentPad = padRef.Get(true);
+                    var pad = currentPad;
+                    if (!IsLive(pad))
+                        pad = vehicleSpawner.repairableVehiclePad;
+                    if (!IsLive(pad))
+                        pad = FindClosestPad(vehicleSpawner.transform.position);
+
+                    if (!IsLive(pad))
+                    {
+                        PrintWarning($"No Airwolf repair pad within {PadSearchRadius}m of spawner @ {vehicleSpawner.transform.position}");
+                        continue;
+                    }
+
+                    if (currentPad != pad || vehicleSpawner.repairableVehiclePad != pad)
+                    {
+                        // EntityRef is a struct; reflection returns a copy.
+                        padRef.Set(pad);
+                        padRefField.SetValue(vehicleSpawner, padRef);
+                        vehicleSpawner.repairableVehiclePad = pad;
+                        vehicleSpawner.InvalidateNetworkCache();
+                        linkedCount++;
+                    }
+
+                    Puts($"Airwolf @ {vehicleSpawner.transform.position} -> pad @ {pad.transform.position}: " +
+                         $"repaired={pad.IsRepaired}, usable={vehicleSpawner.IsPadUsable()}, " +
+                         $"repairsRequired={ConVar.vehicle.padrepairsrequired}");
+                }
+                catch (Exception ex)
+                {
+                    PrintError($"Failed to link repair pad for Spawner @ {vehicleSpawner.transform.position}: {ex.Message}");
+                }
+            }
+            Puts($"Checked {checkedCount} helicopter spawners, linked {linkedCount} repair pads");
+        }
+
+        static RepairableVehiclePad FindClosestPad(Vector3 position)
+        {
+            if (RepairableVehiclePad.server_RepairableVehiclePads == null)
+                return null;
+
+            RepairableVehiclePad closestPad = null;
+            float closestDistanceSquared = PadSearchRadius * PadSearchRadius;
+            foreach (var candidate in RepairableVehiclePad.server_RepairableVehiclePads)
+            {
+                if (!IsLive(candidate) || candidate.ShortPrefabName != "airwolf_helipad.repairable")
+                    continue;
+
+                float distanceSquared = (candidate.transform.position - position).sqrMagnitude;
+                if (distanceSquared > PadSearchRadius * PadSearchRadius)
+                    continue;
+                if (closestPad == null || distanceSquared < closestDistanceSquared)
+                {
+                    closestPad = candidate;
+                    closestDistanceSquared = distanceSquared;
+                }
+            }
+            return closestPad;
         }
     }
 }
