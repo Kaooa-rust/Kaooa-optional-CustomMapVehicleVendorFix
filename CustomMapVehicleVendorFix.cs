@@ -1,27 +1,62 @@
 using System;
-using System.Reflection;
+using System.Collections.Generic;
+using Facepunch;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    .
-    [Info("Custom Map Vehicle Vendor Fix", "Pinkstink", "1.1.1")]
+    [Info("Custom Map Vehicle Vendor Fix", "Pinkstink", "1.1.2")]
     [Description("Links vehicle vendors with spawners and repairable helipads on custom maps Updated by Pe7erS")]
     public class CustomMapVehicleVendorFix : RustPlugin
     {
-        const float VendorSearchRadius = 100f;
-        const float PadSearchRadius = 100f;
+        const float VendorSearchRadius = 25f;
+        const float PadSearchRadius = 25f;
 
-        static readonly FieldInfo padRefField = typeof(VehicleSpawner).GetField("repairableVehiclePadRef",
-            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        struct SpawnerCandidate
+        {
+            public readonly VehicleSpawner Entity;
+            public readonly Vector3 Position;
+
+            public SpawnerCandidate(VehicleSpawner entity)
+            {
+                Entity = entity;
+                Position = entity.transform.position;
+            }
+        }
 
         void OnServerInitialized()
         {
-            var vehicleSpawners = UnityEngine.Object.FindObjectsOfType<VehicleSpawner>();
-            var vehicleVendors = UnityEngine.Object.FindObjectsOfType<VehicleVendor>();
+            var vehicleSpawners = Pool.Get<List<SpawnerCandidate>>();
+            var vehicleVendors = Pool.Get<List<VehicleVendor>>();
 
-            LinkRepairPads(vehicleSpawners);
+            try
+            {
+                // Only server entities can be linked. Gather both types in one pass.
+                foreach (var entity in BaseNetworkable.serverEntities)
+                {
+                    var spawner = entity as VehicleSpawner;
+                    if (IsLive(spawner))
+                        vehicleSpawners.Add(new SpawnerCandidate(spawner));
+                    else
+                    {
+                        var vendor = entity as VehicleVendor;
+                        if (IsLive(vendor))
+                            vehicleVendors.Add(vendor);
+                    }
+                }
 
+                LinkRepairPads(vehicleSpawners);
+                LinkVendors(vehicleVendors, vehicleSpawners);
+            }
+            finally
+            {
+                Pool.FreeUnmanaged(ref vehicleVendors);
+                Pool.FreeUnmanaged(ref vehicleSpawners);
+            }
+        }
+
+        void LinkVendors(List<VehicleVendor> vehicleVendors, List<SpawnerCandidate> vehicleSpawners)
+        {
             int linkedCount = 0;
             foreach (var vehicleVendor in vehicleVendors)
             {
@@ -33,20 +68,26 @@ namespace Oxide.Plugins
                 if (!IsLive(vehicleSpawner))
                     vehicleSpawner = vehicleVendor.vehicleSpawner;
 
+                if (IsLive(vehicleSpawner) && currentSpawner == vehicleSpawner && vehicleVendor.vehicleSpawner == vehicleSpawner)
+                    continue;
+
+                var vendorPosition = vehicleVendor.transform.position;
                 if (!IsLive(vehicleSpawner))
                 {
                     vehicleSpawner = null;
                     float closestDistanceSquared = VendorSearchRadius * VendorSearchRadius;
                     foreach (var candidate in vehicleSpawners)
                     {
-                        if (!IsLive(candidate))
+                        if (!IsLive(candidate.Entity))
                             continue;
-                        float distanceSquared = (candidate.transform.position - vehicleVendor.transform.position).sqrMagnitude;
-                        if (distanceSquared > VendorSearchRadius * VendorSearchRadius)
+                        float distanceSquared = (candidate.Position - vendorPosition).sqrMagnitude;
+                        if (distanceSquared > closestDistanceSquared)
                             continue;
-                        if (vehicleSpawner == null || distanceSquared < closestDistanceSquared)
+                        // Preserve the old scene search's instance-ID tie ordering without sorting.
+                        if (vehicleSpawner == null || distanceSquared < closestDistanceSquared ||
+                            (distanceSquared == closestDistanceSquared && candidate.Entity.GetInstanceID() < vehicleSpawner.GetInstanceID()))
                         {
-                            vehicleSpawner = candidate;
+                            vehicleSpawner = candidate.Entity;
                             closestDistanceSquared = distanceSquared;
                         }
                     }
@@ -54,17 +95,15 @@ namespace Oxide.Plugins
 
                 if (!IsLive(vehicleSpawner))
                 {
-                    PrintWarning($"No Vehicle Spawner within {VendorSearchRadius}m of Vendor @ {vehicleVendor.transform.position}");
+                    PrintWarning($"No Vehicle Spawner within {VendorSearchRadius}m of Vendor @ {vendorPosition}");
                     continue;
                 }
-                if (currentSpawner == vehicleSpawner && vehicleVendor.vehicleSpawner == vehicleSpawner)
-                    continue;
 
                 vehicleVendor.spawnerRef.Set(vehicleSpawner);
                 vehicleVendor.vehicleSpawner = vehicleSpawner;
                 vehicleVendor.InvalidateNetworkCache();
                 linkedCount++;
-                Puts($"Set Vehicle Spawner for Vendor @ {vehicleVendor.transform.position}: {vehicleSpawner.ShortPrefabName} @ {vehicleSpawner.transform.position}");
+                Puts($"Set Vehicle Spawner for Vendor @ {vendorPosition}: {vehicleSpawner.ShortPrefabName} @ {vehicleSpawner.transform.position}");
             }
             Puts($"Linked {linkedCount} vehicle vendors");
         }
@@ -74,18 +113,13 @@ namespace Oxide.Plugins
             return entity != null && !entity.IsDestroyed && entity.net != null && entity.isServer;
         }
 
-        void LinkRepairPads(VehicleSpawner[] vehicleSpawners)
+        void LinkRepairPads(List<SpawnerCandidate> vehicleSpawners)
         {
-            if (padRefField == null || padRefField.FieldType != typeof(EntityRef<RepairableVehiclePad>))
-            {
-                PrintError("VehicleSpawner.repairableVehiclePadRef is missing or has an unexpected type");
-                return;
-            }
-
             int checkedCount = 0;
             int linkedCount = 0;
-            foreach (var vehicleSpawner in vehicleSpawners)
+            foreach (var candidate in vehicleSpawners)
             {
+                var vehicleSpawner = candidate.Entity;
                 if (!IsLive(vehicleSpawner))
                     continue;
 
@@ -96,37 +130,34 @@ namespace Oxide.Plugins
                 checkedCount++;
                 try
                 {
-                    var padRef = (EntityRef<RepairableVehiclePad>)padRefField.GetValue(vehicleSpawner);
-                    var currentPad = padRef.Get(true);
+                    var currentPad = vehicleSpawner.repairableVehiclePadRef.Get(true);
                     var pad = currentPad;
                     if (!IsLive(pad))
                         pad = vehicleSpawner.repairableVehiclePad;
                     if (!IsLive(pad))
-                        pad = FindClosestPad(vehicleSpawner.transform.position);
+                        pad = FindClosestPad(candidate.Position);
 
                     if (!IsLive(pad))
                     {
-                        PrintWarning($"No Airwolf repair pad within {PadSearchRadius}m of spawner @ {vehicleSpawner.transform.position}");
+                        PrintWarning($"No Airwolf repair pad within {PadSearchRadius}m of spawner @ {candidate.Position}");
                         continue;
                     }
 
                     if (currentPad != pad || vehicleSpawner.repairableVehiclePad != pad)
                     {
-                        // EntityRef is a struct; reflection returns a copy.
-                        padRef.Set(pad);
-                        padRefField.SetValue(vehicleSpawner, padRef);
+                        vehicleSpawner.repairableVehiclePadRef.Set(pad);
                         vehicleSpawner.repairableVehiclePad = pad;
                         vehicleSpawner.InvalidateNetworkCache();
                         linkedCount++;
                     }
 
-                    Puts($"Airwolf @ {vehicleSpawner.transform.position} -> pad @ {pad.transform.position}: " +
+                    Puts($"Airwolf @ {candidate.Position} -> pad @ {pad.transform.position}: " +
                          $"repaired={pad.IsRepaired}, usable={vehicleSpawner.IsPadUsable()}, " +
                          $"repairsRequired={ConVar.vehicle.padrepairsrequired}");
                 }
                 catch (Exception ex)
                 {
-                    PrintError($"Failed to link repair pad for Spawner @ {vehicleSpawner.transform.position}: {ex.Message}");
+                    PrintError($"Failed to link repair pad for Spawner @ {candidate.Position}: {ex.Message}");
                 }
             }
             Puts($"Checked {checkedCount} helicopter spawners, linked {linkedCount} repair pads");
