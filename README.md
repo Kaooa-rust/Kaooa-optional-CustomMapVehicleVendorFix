@@ -15,7 +15,6 @@ originally by Pinkstink. Current local plugin version: **1.1.2**.
 - Uses direct Oxide field access; the default Oxide publicizer is required for non-public game fields.
 
 Only `CustomMapVehicleVendorFix.cs` belongs in the server's `oxide/plugins` directory.
-The files in `tests` are local development fixtures, not server plugins.
 
 ## Local change history
 
@@ -42,21 +41,14 @@ git show --stat HEAD
 ```
 
 The local baseline and optimization commits are preserved alongside the upstream history.
-The publication branch is `codex/vendor-linking-cleanup` in
-[rusthb/Rust-CustomMapVehicleVendorFix](https://github.com/rusthb/Rust-CustomMapVehicleVendorFix/tree/codex/vendor-linking-cleanup).
+The published plugin is on `main` in
+[rusthb/Rust-CustomMapVehicleVendorFix](https://github.com/rusthb/Rust-CustomMapVehicleVendorFix/tree/main).
 
 ## Verification
 
-Run in PowerShell 7; no downloaded test packages are required:
+Before publishing, the plugin was compiled and checked locally with minimal Rust/Unity stand-ins. Eight behavior groups passed, covering nearest selection, 3D radius boundaries, existing references, field fallbacks, reloads, invalid entities, tied candidates, empty worlds, missing pad registries, and pool cleanup after an exception. The local test harness is not included in the published files.
 
-```powershell
-pwsh -NoProfile -File .\tests\run.ps1
-pwsh -NoProfile -File .\tests\run.ps1 -Performance
-```
-
-The harness compiles the actual plugin with minimal Rust/Unity stand-ins. The eight behavior groups cover nearest selection, 3D radius boundaries, existing references, field fallbacks, reloads, invalid entities, tied candidates, empty worlds, missing pad registries, and pool cleanup after an exception.
-
-The 32-vendor / 32-spawner fixture produces these operation counts:
+The 32-vendor / 32-spawner fixture produced these operation counts:
 
 | Operation | Baseline | Version 1.1.2 |
 | --- | ---: | ---: |
