@@ -1,67 +1,26 @@
 # Custom Map Vehicle Vendor Fix
 
-Local working copy of the Rust Oxide plugin from
-[rusthb/Rust-CustomMapVehicleVendorFix](https://github.com/rusthb/Rust-CustomMapVehicleVendorFix),
-originally by Pinkstink. Current local plugin version: **1.1.2**.
+Oxide plugin for Rust custom maps where vehicle vendors, spawners, and repairable Airwolf helipads are missing their links.
 
-## Behavior
+On server startup or plugin reload, it connects vendors to the nearest spawner and helicopter spawners to the nearest repairable Airwolf pad. Both searches are limited to **25 metres**. Existing live links are kept. Missing matches are reported in the server console.
 
-- Runs once during server initialization, including plugin reload.
-- Links vendors to the nearest live spawner within **25 metres**.
-- Links helicopter spawners to the nearest live `airwolf_helipad.repairable` within **25 metres**.
-- Uses three-dimensional distance and includes entities exactly on the 25m boundary.
-- Keeps existing live references, even if they are outside the discovery radius, and repairs missing paired references.
-- Reports missing matches without linking a more distant entity.
-- Uses direct Oxide field access; the default Oxide publicizer is required for non-public game fields.
+## Install
 
-Only `CustomMapVehicleVendorFix.cs` belongs in the server's `oxide/plugins` directory.
+Copy `CustomMapVehicleVendorFix.cs` into your server's `oxide/plugins` folder.
 
-## Local change history
+Requires a current version of Oxide with its publicizer enabled (the default).
 
-Commit `0d6e933` records the working copy before the performance changes. It already includes the earlier agreed changes:
+## Search distance
 
-- Both discovery radii reduced from 100m to 25m.
-- Reflection replaced with direct `repairableVehiclePadRef` access.
-- The stray period inside the namespace removed.
+To adjust the ranges, edit these values near the top of the plugin:
 
-Version 1.1.2 changes startup work:
-
-- Collects live vendors and spawners in one pass over `BaseNetworkable.serverEntities`.
-- Replaces two scene-search arrays with pooled lists, returned in `finally` even after an exception.
-- Reads each candidate spawner's position once and each searching vendor's position once.
-- Skips vendors whose two existing references already agree.
-- Preserves the original lowest-instance-ID choice when vendor candidates are equally near, without sorting every candidate list.
-
-Inspect the history or compare the plugin with its baseline:
-
-```powershell
-git log --oneline
-git diff 0d6e933 HEAD -- CustomMapVehicleVendorFix.cs
-git show --stat HEAD
+```csharp
+const float VendorSearchRadius = 25f;
+const float PadSearchRadius = 25f;
 ```
 
-The local baseline and optimization commits are preserved alongside the upstream history.
-The published plugin is on `main` in
-[rusthb/Rust-CustomMapVehicleVendorFix](https://github.com/rusthb/Rust-CustomMapVehicleVendorFix/tree/main).
+Keep them close to your map's actual placement distances to avoid linking unrelated entities.
 
-## Verification
+Checked with a local test harness; still needs testing on a Rust server.
 
-Before publishing, the plugin was compiled and checked locally with minimal Rust/Unity stand-ins. Eight behavior groups passed, covering nearest selection, 3D radius boundaries, existing references, field fallbacks, reloads, invalid entities, tied candidates, empty worlds, missing pad registries, and pool cleanup after an exception. The local test harness is not included in the published files.
-
-The 32-vendor / 32-spawner fixture produced these operation counts:
-
-| Operation | Baseline | Version 1.1.2 |
-| --- | ---: | ---: |
-| Scene searches | 2 | 0 |
-| Server-entity registry passes | 0 | 1 |
-| Position reads | 2,112 | 96 |
-
-These are deterministic operation counts, not timings or a measured server speedup. Matching still compares each unresolved vendor against the collected spawners. Pad discovery still uses Rust's repair-pad registry. This optimization affects startup/reload work; the plugin has no recurring update loop.
-
-A broader synthetic fixture with 32 vendor/spawner/helipad sets reduced position reads from 3,232 to 1,152 (64.4%). Timed runs did not establish an overall speedup: for example, 8 sets plus 100,000 unrelated stand-in entities took about 0.69ms with the baseline and 1.37ms with version 1.1.2. These were medians of nine alternating batches with warmed pools and links reset before each run. The harness substitutes managed LINQ for Unity scene searches, plain C# position getters for native transforms, and no-op logging, so those timings cannot predict Rust server performance. They show why fewer position reads should not be presented as a measured startup-speed improvement. No ongoing server FPS gain is expected from this startup-only change.
-
-The fixtures do not reproduce Unity object lifetime semantics, verify the installed Rust assemblies, or measure the cost of scanning a real server's entity registry. Compilation against the server's actual Oxide/Rust assemblies and an in-game reload remain to be checked.
-
-API references: [Oxide pooling](https://docs.oxidemod.com/guides/developers/pooling),
-[Unity scene-search ordering](https://docs.unity3d.com/ScriptReference/Object.FindObjectsOfType.html),
-[Oxide publicizer defaults](https://github.com/OxideMod/Oxide.Core/blob/develop/src/Configuration/OxideConfig.cs).
+Based on [Pinkstink's original plugin](https://github.com/features-not-bugs/Rust-CustomMapVehicleVendorFix). MIT licensed.
